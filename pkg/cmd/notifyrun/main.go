@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"strings"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/google/shlex"
@@ -11,8 +12,9 @@ import (
 )
 
 const (
-	execFlag   string = "exec"
-	ignoreFlag string = "ignore"
+	execFlag        string = "exec"
+	ignoreFlag      string = "ignore"
+	ignoreEventFlag string = "ignoreEvent"
 )
 
 func main() {
@@ -22,6 +24,7 @@ func main() {
 	app.Flags = []cli.Flag{
 		cli.StringFlag{Name: execFlag, Usage: "Command to exec"},
 		cli.StringSliceFlag{Name: ignoreFlag, Usage: "Files to ignore"},
+		cli.StringSliceFlag{Name: ignoreEventFlag, Usage: "Events to ignore"},
 	}
 
 	app.Action = defaultAction
@@ -32,15 +35,16 @@ func main() {
 func defaultAction(c *cli.Context) error {
 	execStr := c.GlobalString(execFlag)
 	ignoreStrSlice := c.GlobalStringSlice(ignoreFlag)
+	ignoreEventStrSlice := c.GlobalStringSlice(ignoreEventFlag)
 	args := append([]string{c.Args().First()}, c.Args().Tail()...)
 
 	if execStr != "" {
-		return execAction(execStr, ignoreStrSlice, args)
+		return execAction(execStr, ignoreStrSlice, ignoreEventStrSlice, args)
 	}
 	return fmt.Errorf("must select an action type")
 }
 
-func execAction(execStr string, ignoreStrSlice, files []string) error {
+func execAction(execStr string, ignoreStrSlice, ignoreEventStrSlice, files []string) error {
 	if len(files) == 0 {
 		return fmt.Errorf("must specify files/directories to watch")
 	}
@@ -57,9 +61,9 @@ func execAction(execStr string, ignoreStrSlice, files []string) error {
 	defer watcher.Close()
 
 	errC := make(chan error)
-	go handleExecEvents(watcher, splitExecStr, ignoreStrSlice, errC)
+	go handleExecEvents(watcher, splitExecStr, ignoreStrSlice, ignoreEventStrSlice, errC)
 
-	log.Print("watching:", files)
+	log.Print("watching: ", files)
 	for _, f := range files {
 		if err := watcher.Add(f); err != nil {
 			return err
@@ -68,13 +72,13 @@ func execAction(execStr string, ignoreStrSlice, files []string) error {
 	return <-errC
 }
 
-func handleExecEvents(w *fsnotify.Watcher, splitExecStr, ignores []string, errC chan error) {
+func handleExecEvents(w *fsnotify.Watcher, splitExecStr, ignores, ignoreEvents []string, errC chan error) {
 	forceEventC := make(chan struct{}, 1)
 	// Always force at least once run
 	forceEventC <- struct{}{}
 
 	for {
-		if term, err := handleExecEventOnce(w, forceEventC, splitExecStr, ignores); err != nil {
+		if term, err := handleExecEventOnce(w, forceEventC, splitExecStr, ignores, ignoreEvents); err != nil {
 			errC <- err
 			return
 		} else if term {
@@ -84,24 +88,31 @@ func handleExecEvents(w *fsnotify.Watcher, splitExecStr, ignores []string, errC 
 	}
 }
 
-func handleExecEventOnce(w *fsnotify.Watcher, forceEventC chan struct{}, splitExecStr, ignores []string) (bool, error) {
+func handleExecEventOnce(w *fsnotify.Watcher, forceEventC chan struct{}, splitExecStr, ignores, ignoreEvents []string) (bool, error) {
 	ignoreMap := make(map[string]struct{})
 	for _, s := range ignores {
 		ignoreMap[s] = struct{}{}
 	}
+	ignoreEventMap := make(map[string]struct{})
+	for _, s := range ignoreEvents {
+		ignoreEventMap[s] = struct{}{}
+	}
 
 	select {
-	case <-forceEventC:
-		cmd := exec.Command(splitExecStr[0], splitExecStr[1:]...)
-		outB, err := cmd.CombinedOutput()
-		if err != nil {
-			return false, err
-		}
-		log.Print("cmd:", string(outB))
 	case event := <-w.Events:
-		log.Print("event:", event)
+		log.Print("event: ", event)
 		if _, ok := ignoreMap[event.Name]; ok {
-			log.Print("ignore event:", event)
+			log.Print("ignore event name: ", event)
+			return false, nil
+		}
+		validEvents := false
+		for _, e := range strings.Split(event.Op.String(), "|") {
+			if _, ok := ignoreEventMap[e]; !ok {
+				validEvents = true
+			}
+		}
+		if !validEvents {
+			log.Print("ignore event op: ", event)
 			return false, nil
 		}
 
@@ -110,7 +121,14 @@ func handleExecEventOnce(w *fsnotify.Watcher, forceEventC chan struct{}, splitEx
 		if err != nil {
 			return false, err
 		}
-		log.Print("cmd:", string(outB))
+		log.Print("cmd: ", string(outB))
+	case <-forceEventC:
+		cmd := exec.Command(splitExecStr[0], splitExecStr[1:]...)
+		outB, err := cmd.CombinedOutput()
+		if err != nil {
+			return false, err
+		}
+		log.Print("cmd: ", string(outB))
 	case err := <-w.Errors:
 		return false, err
 	}
