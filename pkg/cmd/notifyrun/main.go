@@ -69,8 +69,12 @@ func execAction(execStr string, ignoreStrSlice, files []string) error {
 }
 
 func handleExecEvents(w *fsnotify.Watcher, splitExecStr, ignores []string, errC chan error) {
+	forceEventC := make(chan struct{}, 1)
+	// Always force at least once run
+	forceEventC <- struct{}{}
+
 	for {
-		if term, err := handleExecEventOnce(w, splitExecStr, ignores); err != nil {
+		if term, err := handleExecEventOnce(w, forceEventC, splitExecStr, ignores); err != nil {
 			errC <- err
 			return
 		} else if term {
@@ -80,13 +84,20 @@ func handleExecEvents(w *fsnotify.Watcher, splitExecStr, ignores []string, errC 
 	}
 }
 
-func handleExecEventOnce(w *fsnotify.Watcher, splitExecStr, ignores []string) (bool, error) {
+func handleExecEventOnce(w *fsnotify.Watcher, forceEventC chan struct{}, splitExecStr, ignores []string) (bool, error) {
 	ignoreMap := make(map[string]struct{})
 	for _, s := range ignores {
 		ignoreMap[s] = struct{}{}
 	}
 
 	select {
+	case <-forceEventC:
+		cmd := exec.Command(splitExecStr[0], splitExecStr[1:]...)
+		outB, err := cmd.CombinedOutput()
+		if err != nil {
+			return false, err
+		}
+		log.Print("cmd:", string(outB))
 	case event := <-w.Events:
 		log.Print("event:", event)
 		if _, ok := ignoreMap[event.Name]; ok {
