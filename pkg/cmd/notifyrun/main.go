@@ -5,6 +5,7 @@ import (
 	"log"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/google/shlex"
@@ -77,8 +78,11 @@ func handleExecEvents(w *fsnotify.Watcher, splitExecStr, ignores, ignoreEvents [
 	// Always force at least once run
 	forceEventC <- struct{}{}
 
+	batchedEvents := make(chan struct{}, 1)
+	go batchExecEvents(w, batchedEvents, ignores, ignoreEvents)
+
 	for {
-		if term, err := handleExecEventOnce(w, forceEventC, splitExecStr, ignores, ignoreEvents); err != nil {
+		if term, err := handleExecEventOnce(w, forceEventC, splitExecStr, ignores, ignoreEvents, batchedEvents); err != nil {
 			errC <- err
 			return
 		} else if term {
@@ -88,10 +92,7 @@ func handleExecEvents(w *fsnotify.Watcher, splitExecStr, ignores, ignoreEvents [
 	}
 }
 
-func handleExecEventOnce(w *fsnotify.Watcher, forceEventC chan struct{}, splitExecStr, ignores, ignoreEvents []string) (bool, error) {
-	batchedEvents := make(chan struct{}, 1)
-	go batchExecEvents(w, batchedEvents, ignores, ignoreEvents)
-
+func handleExecEventOnce(w *fsnotify.Watcher, forceEventC chan struct{}, splitExecStr, ignores, ignoreEvents []string, batchedEvents chan struct{}) (bool, error) {
 	select {
 	case <-forceEventC:
 		return runExecCmd(splitExecStr)
@@ -122,28 +123,70 @@ func batchExecEvents(w *fsnotify.Watcher, batchedEvents chan struct{}, ignores, 
 		ignoreEventMap[s] = struct{}{}
 	}
 
-	for event := range w.Events {
-		log.Print("event: ", event)
-		if _, ok := ignoreMap[event.Name]; ok {
-			log.Print("ignore event name: ", event)
-			continue
-		}
-		validEvents := false
-		for _, e := range strings.Split(event.Op.String(), "|") {
-			if _, ok := ignoreEventMap[e]; !ok {
-				validEvents = true
-			}
-		}
-		if !validEvents {
-			log.Print("ignore event op: ", event)
-			continue
-		}
+	ticker := time.NewTicker(time.Second * 5)
 
+	printBuf := make(map[string]int)
+	for {
 		select {
-		case batchedEvents <- struct{}{}:
-			// noop
-		default:
-			// noop for nonblocking
+		case event := <-w.Events:
+			topMsg := fmt.Sprintf("event: %s", event)
+			if _, ok := printBuf[topMsg]; !ok {
+				printBuf[topMsg] = 0
+			}
+			printBuf[topMsg] += 1
+
+			if _, ok := ignoreMap[event.Name]; ok {
+				msg := fmt.Sprintf("ignore event name: %s", event)
+				if _, ok := printBuf[msg]; !ok {
+					printBuf[msg] = 0
+				}
+				printBuf[msg] += 1
+				continue
+			}
+			validEvents := false
+			for _, e := range strings.Split(event.Op.String(), "|") {
+				if _, ok := ignoreEventMap[e]; !ok {
+					validEvents = true
+				}
+			}
+			if !validEvents {
+				msg := fmt.Sprintf("ignore event op: %s", event)
+				if _, ok := printBuf[msg]; !ok {
+					printBuf[msg] = 0
+				}
+				printBuf[msg] += 1
+				continue
+			}
+
+			select {
+			case batchedEvents <- struct{}{}:
+				msg := "write flushed batched messages:"
+				for k, v := range printBuf {
+					msg += fmt.Sprintf("\n[%d] %s", v, k)
+				}
+				log.Print(msg)
+				printBuf = make(map[string]int)
+			default:
+				// noop for nonblocking
+			}
+
+		case <-ticker.C:
+			// XXX This ticker is a hack, instead we should have some shared
+			// state that is protected by a mutex. Then when the reader
+			// side consumes the batched event it can read the printBuf and
+			// flush it. The way it is now, the "write flushed" messages
+			// can fall behind and not get flushed until the next event.
+
+			if len(printBuf) == 0 {
+				continue
+			}
+
+			msg := "ticker flushed batched messages:"
+			for k, v := range printBuf {
+				msg += fmt.Sprintf("\n[%d] %s", v, k)
+			}
+			log.Print(msg)
+			printBuf = make(map[string]int)
 		}
 	}
 }
