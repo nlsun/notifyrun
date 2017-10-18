@@ -89,6 +89,30 @@ func handleExecEvents(w *fsnotify.Watcher, splitExecStr, ignores, ignoreEvents [
 }
 
 func handleExecEventOnce(w *fsnotify.Watcher, forceEventC chan struct{}, splitExecStr, ignores, ignoreEvents []string) (bool, error) {
+	batchedEvents := make(chan struct{}, 1)
+	go batchExecEvents(w, batchedEvents, ignores, ignoreEvents)
+
+	select {
+	case <-forceEventC:
+		return runExecCmd(splitExecStr)
+	case <-batchedEvents:
+		return runExecCmd(splitExecStr)
+	case err := <-w.Errors:
+		return false, err
+	}
+}
+
+func runExecCmd(splitExecStr []string) (bool, error) {
+	cmd := exec.Command(splitExecStr[0], splitExecStr[1:]...)
+	outB, err := cmd.CombinedOutput()
+	if err != nil {
+		return false, err
+	}
+	log.Print("cmd: ", string(outB))
+	return false, nil
+}
+
+func batchExecEvents(w *fsnotify.Watcher, batchedEvents chan struct{}, ignores, ignoreEvents []string) {
 	ignoreMap := make(map[string]struct{})
 	for _, s := range ignores {
 		ignoreMap[s] = struct{}{}
@@ -98,12 +122,11 @@ func handleExecEventOnce(w *fsnotify.Watcher, forceEventC chan struct{}, splitEx
 		ignoreEventMap[s] = struct{}{}
 	}
 
-	select {
-	case event := <-w.Events:
+	for event := range w.Events {
 		log.Print("event: ", event)
 		if _, ok := ignoreMap[event.Name]; ok {
 			log.Print("ignore event name: ", event)
-			return false, nil
+			continue
 		}
 		validEvents := false
 		for _, e := range strings.Split(event.Op.String(), "|") {
@@ -113,24 +136,14 @@ func handleExecEventOnce(w *fsnotify.Watcher, forceEventC chan struct{}, splitEx
 		}
 		if !validEvents {
 			log.Print("ignore event op: ", event)
-			return false, nil
+			continue
 		}
 
-		cmd := exec.Command(splitExecStr[0], splitExecStr[1:]...)
-		outB, err := cmd.CombinedOutput()
-		if err != nil {
-			return false, err
+		select {
+		case batchedEvents <- struct{}{}:
+			// noop
+		default:
+			// noop for nonblocking
 		}
-		log.Print("cmd: ", string(outB))
-	case <-forceEventC:
-		cmd := exec.Command(splitExecStr[0], splitExecStr[1:]...)
-		outB, err := cmd.CombinedOutput()
-		if err != nil {
-			return false, err
-		}
-		log.Print("cmd: ", string(outB))
-	case err := <-w.Errors:
-		return false, err
 	}
-	return false, nil
 }
