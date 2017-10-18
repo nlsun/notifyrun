@@ -125,6 +125,8 @@ func batchExecEvents(w *fsnotify.Watcher, batchedEvents chan struct{}, ignores, 
 
 	ticker := time.NewTicker(time.Second * 5)
 
+	// XXX printBuf should be its own type, so the operations can be struct
+	// functions.
 	printBuf := make(map[string]int)
 	for {
 		select {
