@@ -131,12 +131,6 @@ func batchExecEvents(w *fsnotify.Watcher, batchedEvents chan struct{}, ignores, 
 	for {
 		select {
 		case event := <-w.Events:
-			topMsg := fmt.Sprintf("event: %s", event)
-			if _, ok := printBuf[topMsg]; !ok {
-				printBuf[topMsg] = 0
-			}
-			printBuf[topMsg] += 1
-
 			if _, ok := ignoreMap[event.Name]; ok {
 				msg := fmt.Sprintf("ignore event name: %s", event)
 				if _, ok := printBuf[msg]; !ok {
@@ -159,6 +153,11 @@ func batchExecEvents(w *fsnotify.Watcher, batchedEvents chan struct{}, ignores, 
 				printBuf[msg] += 1
 				continue
 			}
+			msg := fmt.Sprintf("accept event: %s", event)
+			if _, ok := printBuf[msg]; !ok {
+				printBuf[msg] = 0
+			}
+			printBuf[msg] += 1
 
 			select {
 			case batchedEvents <- struct{}{}:
@@ -178,6 +177,9 @@ func batchExecEvents(w *fsnotify.Watcher, batchedEvents chan struct{}, ignores, 
 			// side consumes the batched event it can read the printBuf and
 			// flush it. The way it is now, the "write flushed" messages
 			// can fall behind and not get flushed until the next event.
+
+			// XXX Actually, you'll always need some form of polling flush
+			// because otherwise ignore events will never get flushed.
 
 			if len(printBuf) == 0 {
 				continue
