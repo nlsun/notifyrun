@@ -82,35 +82,40 @@ func handleExecEvents(w *fsnotify.Watcher, splitExecStr, ignores, ignoreEvents [
 	go batchExecEvents(w, batchedEvents, ignores, ignoreEvents)
 
 	for {
-		if term, err := handleExecEventOnce(w, forceEventC, splitExecStr, ignores, ignoreEvents, batchedEvents); err != nil {
+		if err := handleExecEventOnce(w, forceEventC, splitExecStr, ignores, ignoreEvents, batchedEvents); err != nil {
 			errC <- err
-			return
-		} else if term {
-			errC <- nil
 			return
 		}
 	}
 }
 
-func handleExecEventOnce(w *fsnotify.Watcher, forceEventC chan struct{}, splitExecStr, ignores, ignoreEvents []string, batchedEvents chan struct{}) (bool, error) {
+func handleExecEventOnce(w *fsnotify.Watcher, forceEventC chan struct{}, splitExecStr, ignores, ignoreEvents []string, batchedEvents chan struct{}) error {
 	select {
 	case <-forceEventC:
 		return runExecCmd(splitExecStr)
 	case <-batchedEvents:
 		return runExecCmd(splitExecStr)
 	case err := <-w.Errors:
-		return false, err
+		return err
 	}
 }
 
-func runExecCmd(splitExecStr []string) (bool, error) {
+func runExecCmd(splitExecStr []string) error {
 	cmd := exec.Command(splitExecStr[0], splitExecStr[1:]...)
 	outB, err := cmd.CombinedOutput()
-	if err != nil {
-		return false, err
+	if err == nil {
+		log.Print("cmd: ", string(outB))
+		return nil
 	}
-	log.Print("cmd: ", string(outB))
-	return false, nil
+
+	// If the command fails, log the error and carry on.
+	if _, ok := err.(*exec.ExitError); ok {
+		log.Print("cmd error out: ", string(outB))
+		log.Print("cmd error err: ", err)
+		return nil
+	}
+
+	return err
 }
 
 func batchExecEvents(w *fsnotify.Watcher, batchedEvents chan struct{}, ignores, ignoreEvents []string) {
