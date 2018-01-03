@@ -18,6 +18,13 @@ const (
 	ignoreEventFlag string = "ignoreEvent"
 )
 
+type watch struct {
+	execStrs     []string
+	ignoreStrs   []string
+	ignoreEvStrs []string
+	files        []string
+}
+
 func main() {
 	app := cli.NewApp()
 	app.Usage = "notifyrun"
@@ -39,20 +46,34 @@ func defaultAction(c *cli.Context) error {
 	ignoreEventStrSlice := c.GlobalStringSlice(ignoreEventFlag)
 	args := append([]string{c.Args().First()}, c.Args().Tail()...)
 
+	w, err := newWatch(execStr, ignoreStrSlice, ignoreEventStrSlice, args)
+	if err != nil {
+		return err
+	}
+
 	if execStr != "" {
-		return execAction(execStr, ignoreStrSlice, ignoreEventStrSlice, args)
+		return w.execAction()
 	}
 	return fmt.Errorf("must select an action type")
 }
 
-func execAction(execStr string, ignoreStrSlice, ignoreEventStrSlice, files []string) error {
-	if len(files) == 0 {
-		return fmt.Errorf("must specify files/directories to watch")
-	}
-
+func newWatch(execStr string, ignoreStrSlice, ignoreEventStrSlice, args []string) (*watch, error) {
 	splitExecStr, err := shlex.Split(execStr)
 	if err != nil {
-		return err
+		return nil, err
+	}
+
+	return &watch{
+		execStrs:     splitExecStr,
+		ignoreStrs:   ignoreStrSlice,
+		ignoreEvStrs: ignoreEventStrSlice,
+		files:        args,
+	}, nil
+}
+
+func (w *watch) execAction() error {
+	if len(w.files) == 0 {
+		return fmt.Errorf("must specify files/directories to watch")
 	}
 
 	watcher, err := fsnotify.NewWatcher()
@@ -62,10 +83,10 @@ func execAction(execStr string, ignoreStrSlice, ignoreEventStrSlice, files []str
 	defer watcher.Close()
 
 	errC := make(chan error)
-	go handleExecEvents(watcher, splitExecStr, ignoreStrSlice, ignoreEventStrSlice, errC)
+	go w.handleExecEvents(watcher, errC)
 
-	log.Print("watching: ", files)
-	for _, f := range files {
+	log.Print("watching: ", w.files)
+	for _, f := range w.files {
 		if err := watcher.Add(f); err != nil {
 			return err
 		}
@@ -73,29 +94,29 @@ func execAction(execStr string, ignoreStrSlice, ignoreEventStrSlice, files []str
 	return <-errC
 }
 
-func handleExecEvents(w *fsnotify.Watcher, splitExecStr, ignores, ignoreEvents []string, errC chan error) {
+func (w *watch) handleExecEvents(fsw *fsnotify.Watcher, errC chan error) {
 	forceEventC := make(chan struct{}, 1)
-	// Always force at least once run
+	// Always force at least one run
 	forceEventC <- struct{}{}
 
 	batchedEvents := make(chan struct{}, 1)
-	go batchExecEvents(w, batchedEvents, ignores, ignoreEvents)
+	go w.batchExecEvents(fsw, batchedEvents)
 
 	for {
-		if err := handleExecEventOnce(w, forceEventC, splitExecStr, ignores, ignoreEvents, batchedEvents); err != nil {
+		if err := w.handleExecEventOnce(fsw, forceEventC, batchedEvents); err != nil {
 			errC <- err
 			return
 		}
 	}
 }
 
-func handleExecEventOnce(w *fsnotify.Watcher, forceEventC chan struct{}, splitExecStr, ignores, ignoreEvents []string, batchedEvents chan struct{}) error {
+func (w *watch) handleExecEventOnce(fsw *fsnotify.Watcher, forceEventC chan struct{}, batchedEvents chan struct{}) error {
 	select {
 	case <-forceEventC:
-		return runExecCmd(splitExecStr)
+		return runExecCmd(w.execStrs)
 	case <-batchedEvents:
-		return runExecCmd(splitExecStr)
-	case err := <-w.Errors:
+		return runExecCmd(w.execStrs)
+	case err := <-fsw.Errors:
 		return err
 	}
 }
@@ -118,13 +139,13 @@ func runExecCmd(splitExecStr []string) error {
 	return err
 }
 
-func batchExecEvents(w *fsnotify.Watcher, batchedEvents chan struct{}, ignores, ignoreEvents []string) {
+func (w *watch) batchExecEvents(fsw *fsnotify.Watcher, batchedEvents chan struct{}) {
 	ignoreMap := make(map[string]struct{})
-	for _, s := range ignores {
+	for _, s := range w.ignoreStrs {
 		ignoreMap[s] = struct{}{}
 	}
 	ignoreEventMap := make(map[string]struct{})
-	for _, s := range ignoreEvents {
+	for _, s := range w.ignoreEvStrs {
 		ignoreEventMap[s] = struct{}{}
 	}
 
@@ -135,7 +156,7 @@ func batchExecEvents(w *fsnotify.Watcher, batchedEvents chan struct{}, ignores, 
 	printBuf := make(map[string]int)
 	for {
 		select {
-		case event := <-w.Events:
+		case event := <-fsw.Events:
 			if _, ok := ignoreMap[event.Name]; ok {
 				msg := fmt.Sprintf("ignore event name: %s", event)
 				if _, ok := printBuf[msg]; !ok {
@@ -184,7 +205,8 @@ func batchExecEvents(w *fsnotify.Watcher, batchedEvents chan struct{}, ignores, 
 			// can fall behind and not get flushed until the next event.
 
 			// XXX Actually, you'll always need some form of polling flush
-			// because otherwise ignore events will never get flushed.
+			// because otherwise ignore events will never get flushed. Or
+			// have a separate channel for flushing.
 
 			if len(printBuf) == 0 {
 				continue
