@@ -1,6 +1,15 @@
-Runs things
+Watches files and runs things in response.
 
-Uses dep for vendoring
+Uses `dep` for vendoring.
+
+It does not recursively watch directories, use shell commands to do that:
+```
+# Watch mydir
+notifyrun --exec "echo hi" mydir
+
+# Recursively watch mydir
+notifyrun --exec "echo hi" $(find mydir -type d)
+```
 
 # Example
 
@@ -8,7 +17,7 @@ Uses dep for vendoring
 $ cat runtags.sh
 #!/bin/bash
 
-notifyrun --exec "./dotags.sh" --ignore "core/tags" --ignore "core/tags.tmp" --ignoreEvent "CHMOD" core
+notifyrun --exec "./dotags.sh" --ignore "core/tags" --ignore "core/tags.tmp" --ignoreEvent "CHMOD" $(find core -type d)
 ```
 
 ```
